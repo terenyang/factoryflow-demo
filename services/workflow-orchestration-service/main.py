@@ -1,46 +1,29 @@
-"""Workflow orchestration service.
-
-This service demonstrates centralized workflow orchestration.
-Services should not hardcode the next processing step.
-The workflow definition determines routing behavior.
-"""
+"""Workflow orchestration service for FactoryFlow."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
-import time
 
 from opentelemetry import trace
 from opentelemetry.propagate import extract
 
-from shared.factoryflow.messaging import (
-    create_consumer,
-    create_producer,
-    headers_to_carrier,
-    publish_event,
-)
-from shared.factoryflow.otel import setup_otel
+from factoryflow.messaging import create_consumer, create_producer, headers_to_carrier, publish_event
+from factoryflow.otel import setup_otel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("workflow-orchestration-service")
 
-setup_otel("workflow-orchestration-service")
-tracer = trace.get_tracer(__name__)
-
+SERVICE_NAME = "workflow-orchestration-service"
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "redpanda:9092")
-SCAN_TOPIC = "factory.scan.received"
-VALIDATION_TOPIC = "factory.validation.requested"
-WORKFLOW_COMPLETED_TOPIC = "factory.workflow.orchestration.completed"
+OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317")
+SCAN_TOPIC = os.getenv("SCAN_TOPIC", "factory.scan.received")
+VALIDATION_TOPIC = os.getenv("VALIDATION_TOPIC", "factory.validation.requested")
+WORKFLOW_LIFECYCLE_TOPIC = os.getenv("WORKFLOW_LIFECYCLE_TOPIC", "factory.workflow.lifecycle")
 
-consumer = create_consumer(
-    bootstrap_servers=KAFKA_BOOTSTRAP,
-    group_id="workflow-orchestration-service",
-    topics=[SCAN_TOPIC],
-)
-
-producer = create_producer(KAFKA_BOOTSTRAP)
+setup_otel(SERVICE_NAME, OTEL_EXPORTER_OTLP_ENDPOINT)
+tracer = trace.get_tracer(__name__)
 
 WORKFLOW_TEMPLATE = {
     "name": "standard-assembly-flow",
@@ -48,68 +31,61 @@ WORKFLOW_TEMPLATE = {
     "steps": [
         {
             "step": 1,
-            "service": "validator-service",
-            "success_topic": "factory.validation.completed",
-            "error_topic": "factory.validation.error",
+            "service": "errorproof-service",
+            "request_topic": VALIDATION_TOPIC,
+            "success_topic": "factory.errorproof.completed",
+            "error_topic": "factory.errorproof.error",
         }
     ],
 }
 
 
-while True:
-    msg = consumer.poll(1.0)
-
-    if msg is None:
-        continue
-
-    if msg.error():
-        logger.warning(f"Kafka consumer error: {msg.error()}")
-        continue
-
-    carrier = headers_to_carrier(msg.headers())
+def handle_message(raw_value: bytes, raw_headers: list[tuple[str, bytes]] | None, producer) -> None:
+    carrier = headers_to_carrier(raw_headers)
     parent_context = extract(carrier)
 
-    with tracer.start_as_current_span(
-        "workflow_orchestration",
-        context=parent_context,
-    ) as span:
-        event = json.loads(msg.value().decode("utf-8"))
-
+    with tracer.start_as_current_span("workflow_orchestration", context=parent_context) as span:
+        event = json.loads(raw_value.decode("utf-8"))
         correlation_id = event.get("correlation_id", "")
         workflow_id = event.get("workflow_id", "")
 
         span.set_attribute("correlation_id", correlation_id)
         span.set_attribute("workflow_id", workflow_id)
+        span.set_attribute("workflow.name", WORKFLOW_TEMPLATE["name"])
 
-        # Workflow metadata is injected once and propagated downstream.
-        event["workflow"] = WORKFLOW_TEMPLATE
-        event["workflow"]["state"] = "IN_PROGRESS"
-        event["workflow"]["current_step"] = 1
+        # The orchestrator owns routing. Downstream services execute steps only.
+        event["workflow"] = {**WORKFLOW_TEMPLATE, "state": "IN_PROGRESS", "current_step": 1}
 
+        publish_event(producer, VALIDATION_TOPIC, event, key=event.get("session_id"))
         publish_event(
-            producer=producer,
-            topic=VALIDATION_TOPIC,
-            event=event,
-            key=event.get("session_id"),
-        )
-
-        publish_event(
-            producer=producer,
-            topic=WORKFLOW_COMPLETED_TOPIC,
-            event={
+            producer,
+            WORKFLOW_LIFECYCLE_TOPIC,
+            {
+                "event_type": "factory.workflow.dispatched",
                 "correlation_id": correlation_id,
                 "workflow_id": workflow_id,
-                "event_type": WORKFLOW_COMPLETED_TOPIC,
+                "workflow": {"name": WORKFLOW_TEMPLATE["name"], "current_step": 1},
             },
             key=event.get("session_id"),
         )
 
-        logger.info(
-            "Workflow dispatched",
-            extra={
-                "correlation_id": correlation_id,
-                "workflow": WORKFLOW_TEMPLATE["name"],
-            },
-        )
+        logger.info("workflow dispatched", extra={"correlation_id": correlation_id})
 
-    time.sleep(0.05)
+
+def run() -> None:
+    consumer = create_consumer(KAFKA_BOOTSTRAP, SERVICE_NAME, [SCAN_TOPIC])
+    producer = create_producer(KAFKA_BOOTSTRAP)
+    logger.info("workflow orchestration service started")
+
+    while True:
+        msg = consumer.poll(1.0)
+        if msg is None:
+            continue
+        if msg.error():
+            logger.warning("consumer error: %s", msg.error())
+            continue
+        handle_message(msg.value(), msg.headers(), producer)
+
+
+if __name__ == "__main__":
+    run()
