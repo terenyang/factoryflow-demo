@@ -18,32 +18,47 @@ This repository is intentionally generic. It does **not** contain company source
 
 ## Architecture
 
-```text
-Operator / Test Client
-        |
-        v
-  Scan Gateway
-        |
-        v
-  Redpanda Topic: factory.scan.received
-        |
-        v
-  Workflow Orchestrator
-        |
-        v
-  Redpanda Topic: factory.validation.requested
-        |
-        v
-  Validation Service
-        |
-        v
-  Redpanda Topic: factory.partcounter.requested
-        |
-        v
-  Part Counter Service
-        |
-        v
-  Redpanda Topic: factory.workflow.completed
+```mermaid
+flowchart LR
+    client[Operator / Test Client] --> gateway[Scan Gateway]
+    gateway --> scanTopic[(factory.scan.received)]
+    scanTopic --> orchestrator[Workflow Orchestrator]
+    orchestrator --> validationTopic[(factory.validation.requested)]
+    validationTopic --> validation[Validation Service]
+    validation --> counterTopic[(factory.partcounter.requested)]
+    counterTopic --> counter[Part Counter Service]
+    counter --> completedTopic[(factory.workflow.completed)]
+
+    gateway -. trace context .-> orchestrator
+    orchestrator -. trace context .-> validation
+    validation -. trace context .-> counter
+```
+
+## Event flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Operator / Test Client
+    participant Gateway as Scan Gateway
+    participant Bus as Redpanda / Kafka-compatible Bus
+    participant Orchestrator as Workflow Orchestrator
+    participant Validation as Validation Service
+    participant Counter as Part Counter Service
+    participant Trace as OpenTelemetry / Jaeger
+
+    Client->>Gateway: POST /scans
+    Gateway->>Trace: Create root span
+    Gateway->>Bus: Publish factory.scan.received
+    Bus->>Orchestrator: Consume scan event
+    Orchestrator->>Trace: Continue trace context
+    Orchestrator->>Bus: Publish factory.validation.requested
+    Bus->>Validation: Consume validation request
+    Validation->>Trace: Continue trace context
+    Validation->>Bus: Publish factory.partcounter.requested
+    Bus->>Counter: Consume part counter request
+    Counter->>Trace: Continue trace context
+    Counter->>Bus: Publish factory.workflow.completed
 ```
 
 ## Repository structure
@@ -53,6 +68,7 @@ factoryflow-demo/
 ├── docker-compose.yml
 ├── docs/
 │   ├── architecture.md
+│   ├── design-decisions.md
 │   ├── event-schema.md
 │   └── tracing.md
 ├── services/
@@ -76,6 +92,10 @@ factoryflow-demo/
 4. The Validation Service validates the scan using simple demo rules.
 5. The Part Counter increments a synthetic production counter.
 6. The workflow completes and can be traced end-to-end in Jaeger.
+
+## Design notes
+
+For architecture rationale and trade-offs, see [Design Decisions](docs/design-decisions.md).
 
 ## Local development target
 
