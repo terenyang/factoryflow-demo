@@ -1,0 +1,77 @@
+version: '3.9'
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.1.2
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  scan-gateway:
+    image: python:3.12-slim
+    working_dir: /app
+    command: sh -c "echo 'scan-gateway placeholder service' && sleep infinity"
+    volumes:
+      - ./services/scan-gateway:/app
+    depends_on:
+      - redpanda
+      - redis
+      - jaeger
+
+  workflow-orchestrator:
+    image: python:3.12-slim
+    working_dir: /app
+    command: sh -c "echo 'workflow-orchestrator placeholder service' && sleep infinity"
+    volumes:
+      - ./services/workflow-orchestrator:/app
+    depends_on:
+      - redpanda
+      - redis
+      - jaeger
+
+  validation-service:
+    image: python:3.12-slim
+    working_dir: /app
+    command: sh -c "echo 'validation-service placeholder service' && sleep infinity"
+    volumes:
+      - ./services/validation-service:/app
+    depends_on:
+      - redpanda
+      - redis
+      - jaeger
+
+  part-counter:
+    image: python:3.12-slim
+    working_dir: /app
+    command: sh -c "echo 'part-counter placeholder service' && sleep infinity"
+    volumes:
+      - ./services/part-counter:/app
+    depends_on:
+      - redpanda
+      - redis
+      - jaeger
