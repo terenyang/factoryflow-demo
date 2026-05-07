@@ -12,16 +12,34 @@ services:
       - --reserve-memory=0M
       - --node-id=0
       - --check=false
-      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=redpanda:8082
+      - --schema-registry-addr=0.0.0.0:8081
     ports:
-      - "9092:9092"
+      - "19092:19092"
       - "9644:9644"
+      - "8081:8081"
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
-  redis:
-    image: redis:7-alpine
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.0
+    environment:
+      KAFKA_BROKERS: redpanda:9092
     ports:
-      - "6379:6379"
+      - "8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
 
   jaeger:
     image: jaegertracing/all-in-one:1.58
@@ -33,45 +51,49 @@ services:
       - "4318:4318"
 
   scan-gateway:
-    image: python:3.12-slim
-    working_dir: /app
-    command: sh -c "echo 'scan-gateway placeholder service' && sleep infinity"
-    volumes:
-      - ./services/scan-gateway:/app
+    build:
+      context: .
+      dockerfile: services/scan-gateway/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      SCAN_TOPIC: factory.scan.received
+    ports:
+      - "8000:8000"
     depends_on:
-      - redpanda
-      - redis
-      - jaeger
+      redpanda:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
 
-  workflow-orchestrator:
-    image: python:3.12-slim
-    working_dir: /app
-    command: sh -c "echo 'workflow-orchestrator placeholder service' && sleep infinity"
-    volumes:
-      - ./services/workflow-orchestrator:/app
+  workflow-orchestration-service:
+    build:
+      context: .
+      dockerfile: services/workflow-orchestration-service/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      SCAN_TOPIC: factory.scan.received
+      VALIDATION_TOPIC: factory.validation.requested
+      WORKFLOW_LIFECYCLE_TOPIC: factory.workflow.lifecycle
     depends_on:
-      - redpanda
-      - redis
-      - jaeger
+      redpanda:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
 
-  validation-service:
-    image: python:3.12-slim
-    working_dir: /app
-    command: sh -c "echo 'validation-service placeholder service' && sleep infinity"
-    volumes:
-      - ./services/validation-service:/app
+  validator-service:
+    build:
+      context: .
+      dockerfile: services/validator-service/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      VALIDATION_TOPIC: factory.validation.requested
+      SUCCESS_TOPIC: factory.errorproof.completed
+      ERROR_TOPIC: factory.errorproof.error
     depends_on:
-      - redpanda
-      - redis
-      - jaeger
-
-  part-counter:
-    image: python:3.12-slim
-    working_dir: /app
-    command: sh -c "echo 'part-counter placeholder service' && sleep infinity"
-    volumes:
-      - ./services/part-counter:/app
-    depends_on:
-      - redpanda
-      - redis
-      - jaeger
+      redpanda:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
